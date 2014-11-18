@@ -14,13 +14,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import contextmanager
 import termios
 import struct
 import fcntl
 import select
 import os
+from Queue import Queue
 import re
+import socket
+import tempfile
+import threading
 import time
+import traceback
 
 
 def set_pty_size(fd, size):
@@ -143,3 +149,109 @@ def container_running(client, container, duration=2):
     time.sleep(duration)
     config = client.inspect_container(container)
     return config['State']['Running']
+
+
+@contextmanager
+def a_temp_file():
+    fle = None
+    try:
+        fle = tempfile.NamedTemporaryFile(delete=False).name
+        yield fle
+    finally:
+        if fle and os.path.exists(fle):
+            os.remove(fle)
+
+
+@contextmanager
+def a_socket(filename, method="bind"):
+    sckt = None
+    try:
+        sckt = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        getattr(sckt, method)(filename)
+        if method == 'bind':
+            sckt.listen(1)
+        yield sckt
+    finally:
+        if sckt:
+            sckt.close()
+
+
+@contextmanager
+def slow_write_thread(message, wait=0.5, chunk_size=5):
+    """
+    Start a thread that slowly writes the message to a socket.
+
+    Yield an info dictionary
+    ``{ 'started': <bool>, 'stopped': <bool>, 'please_stop': <func>
+      , 'data': <socket>, 'reader': object(read())
+      }``
+
+    This socket can be read via info["reader"].read(<num>)
+
+    Calling ``info['please_stop']`` will set ``stopped`` to True.
+
+    The thread stops when all the message is written
+    or if the context manager is exited
+    or if ``info['stopped']`` is set to True
+    """
+    with a_temp_file() as filename:
+        os.remove(filename)
+        info = {'stopped': False, "started": False, "error": None, "connected": False}
+        info["please_stop"] = lambda: dict.__setitem__(info, 'stop', True)
+
+        def writer():
+            """Slowly write msg to sckt"""
+            try:
+                with a_socket(filename, 'bind') as writer:
+                    while True:
+                        if not info["connected"]:
+                            time.sleep(0.1)
+                            continue
+
+                        nxt = message.read(chunk_size)
+                        if not nxt or info["stopped"]:
+                            info["stopped"] = True
+                            break
+
+                        writer.send(nxt)
+                        info['started'] = True
+
+                        if info["stopped"]:
+                            break
+                        time.sleep(wait)
+            except Exception as e:
+                info["error"] = e
+                info["traceback"] = traceback.format_exc()
+            finally:
+                info["stopped"] = True
+
+        threading.Thread(target=writer).start()
+
+        while not info["started"]:
+            if info["stopped"]:
+                msg = "Something about the write thread failed\n{0}: {1}\n{2}"
+                assert False, msg.format(
+                    info["error"].__class__.__name__, info["error"], info["traceback"]
+                )
+            time.sleep(0.5)
+
+        with a_socket(filename, 'connect') as reader:
+            read = lambda fake_reader, num: reader.recv(num)
+            info["reader"] = type("Reader", (object, ), {"read": read})()
+            info["connected"] = True
+
+            try:
+                yield info
+                if not info["stopped"]:
+                    assert False, "The test finished before the writer thread!"
+                if info["error"]:
+                    assert False, "The write thread failed\n{0}".format(info["error"])
+            except AssertionError as error:
+                if not info["error"]:
+                    raise
+                else:
+                    msg = "The write thread and the test both failed\n{0}: {1}\n{2}: {3}"
+                    assert False, msg.format(
+                        info["error"].__class__.__name__, info["error"],
+                        error.__class__.__name__, error
+                    )

@@ -15,12 +15,14 @@
 # limitations under the License.
 
 from expects import expect, equal, be_none, be_true, be_false
+from tests.util import slow_write_thread
 from io import StringIO
 import dockerpty.io as io
 
 import sys
 import os
 import fcntl
+import time
 import socket
 import tempfile
 
@@ -159,6 +161,15 @@ class TestDemuxer(object):
         demuxer = io.Demuxer(s)
         demuxer.write(u'test')
         expect(s.getvalue()).to(equal('test'))
+
+
+    def test_reading_from_a_slow_socket(self):
+        with slow_write_thread(self.create_fixture()) as info:
+            demuxer = io.Demuxer(info['reader'])
+            expect(demuxer.read(32)).to(equal('fo'))
+            expect(demuxer.read(32)).to(equal('d'))
+            expect(demuxer.read(32)).to(equal(''))
+
 
     def test_repr(self):
         s = StringIO()
