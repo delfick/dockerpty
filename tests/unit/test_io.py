@@ -124,7 +124,10 @@ class SlowStream(object):
         if len(self.chunks) == 0:
             return ''
         else:
-            if len(self.chunks[0]) <= n:
+            if self.chunks[0] is None:
+                chunk = self.chunks[0]
+                self.chunks = self.chunks[1:]
+            elif len(self.chunks[0]) <= n:
                 chunk = self.chunks[0]
                 self.chunks = self.chunks[1:]
             else:
@@ -175,6 +178,7 @@ class TestDemuxer(object):
         slow_stream = SlowStream([
             "\x01\x00\x00\x00",
             "\x00\x00\x00\x03foo",
+            None,
             "\x01\x00",
             "\x00\x00\x00\x00\x00\x01d",
         ])
